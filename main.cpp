@@ -83,8 +83,8 @@ unsigned int AllocAndFreeProc1(void* arg)
 				_LOG(dfLOG_LEVEL_ERROR, L"gt_TestNodeArr[i] using!");
 				exit(1);
 			}
-			//else
-				//_LOG(dfLOG_LEVEL_ERROR, L"OK!");
+			else
+				_LOG(dfLOG_LEVEL_SYSTEM, L"OK!");
 
 			g_ObjectPool.freeObject(gt_TestNodeArr[i]);
 		}
@@ -208,20 +208,18 @@ void Test2()
 
 int main()
 {
-	InitLog(dfLOG_LEVEL_DEBUG, ELogMode::CONSOLE);
+	InitLog(dfLOG_LEVEL_DEBUG, ELogMode::NOLOG);
 
-	//Test1();
+	Test1();
 
-	CObjectPool<TestNode> pool(true, 1);
 	
-	while (1)
-	{
-		TestNode* p = pool.allocObject(1, 2);
-		pool.freeObject(p);
-		p = pool.allocObject();
-	}
 
 
+	/*CObjectPool<TestNode> *pool = new CObjectPool<TestNode>(true, 500);
+	TestNode* p = pool->allocObject();
+	pool->freeObject(p);
+	delete pool;*/
+	
 	/*
 	TestNode* arr[5];
 

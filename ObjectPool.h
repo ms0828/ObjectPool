@@ -31,7 +31,6 @@ public:
 		top = nullptr;
 		allocCnt = 0;
 		poolCnt = 0;
-		InitializeSRWLock(&poolLock);
 
 		for (int i = 0; i < poolNum; i++)
 		{
@@ -40,8 +39,8 @@ public:
 			newNode->tailFence = dfFenceValue;
 			newNode->seed = poolSeed;
 			newNode->next = top;
-			top = newNode;
-			
+			top = PackingNode(newNode, GetNodeStamp(top) + 1);
+
 			//--------------------------------------------------------
 			// bPreConstructor가 true인 경우, 처음 생성 시 생성자 호출
 			//--------------------------------------------------------
@@ -57,18 +56,26 @@ public:
 
 	~CObjectPool()
 	{
-		while (top != nullptr)
+		while (1)
 		{
-			Node* deleteNode = top;
-			top = top->next;
-			
+			Node* t;
+			Node* maskedT;
+			Node* nextTop;
+			do
+			{
+				t = top;
+				maskedT = UnpackingNode(t);
+				if (maskedT == nullptr)
+					return;
+				nextTop = PackingNode(maskedT->next, GetNodeStamp(t) + 1);
+			} while (InterlockedCompareExchangePointer((void* volatile*)&top, nextTop, t) != t);
 			//------------------------------------------------------------------------------
 			// bPreConstructor가 true인 경우, ObjectPool이 소멸될 때 instance의 소멸자 호출
 			//------------------------------------------------------------------------------
 			if (bPreConstructor)
-				delete deleteNode;
+				delete maskedT;
 			else
-				free(deleteNode);
+				free(maskedT);
 		}
 	}
 	
@@ -84,33 +91,42 @@ public:
 	template<typename... Args>
 	T* allocObject(Args&&... args)
 	{
-		AcquireSRWLockExclusive(&poolLock);
-		if (top == nullptr)
+		Node* t = nullptr;
+		Node* nextTop = nullptr;
+		Node* maskedT = nullptr;
+
+		do
 		{
-			Node* newNode = (Node*)malloc(sizeof(Node));
-			newNode->headFence = dfFenceValue;
-			newNode->tailFence = dfFenceValue;
-			newNode->seed = poolSeed;
-			T* instance = &newNode->instance;
-			new (instance) T(std::forward<Args>(args)...);
-			allocCnt++;
-			_LOG(dfLOG_LEVEL_DEBUG, L"[AllocObject] : allocCnt = %d / poolCnt = %d\n", allocCnt, poolCnt);
-			ReleaseSRWLockExclusive(&poolLock);
-			return instance;
-		}
-		else
-		{	
-			Node* allocNode = top;
-			top = allocNode->next;
-			T* instance = &allocNode->instance;
-			if (!bPreConstructor)
+			t = top;
+			maskedT = UnpackingNode(t);
+			if (maskedT == nullptr)
+			{
+				Node* newNode = (Node*)malloc(sizeof(Node));
+				newNode->headFence = dfFenceValue;
+				newNode->tailFence = dfFenceValue;
+				newNode->seed = poolSeed;
+				newNode->next = nullptr;
+				T* instance = &newNode->instance;
 				new (instance) T(std::forward<Args>(args)...);
-			poolCnt--;
-			allocCnt++;
-			_LOG(dfLOG_LEVEL_DEBUG, L"[AllocObject] : allocCnt = %d / poolCnt = %d\n", allocCnt, poolCnt);
-			ReleaseSRWLockExclusive(&poolLock);
-			return instance;
-		}
+			#ifdef dfDebugObjectPool
+				InterlockedIncrement(&allocCnt);
+			#endif
+				return instance;
+			}
+
+			nextTop = PackingNode(maskedT->next, GetNodeStamp(t) + 1);
+		} while (InterlockedCompareExchangePointer((void* volatile*)&top, nextTop, t) != t);
+
+		T* instance = &maskedT->instance;
+		if (!bPreConstructor)
+			new (instance) T(std::forward<Args>(args)...);
+
+#ifdef dfDebugObjectPool
+		InterlockedDecrement(&poolCnt);
+		InterlockedIncrement(&allocCnt);
+#endif
+
+		return instance;
 	}
 
 	//---------------------------------------------------------------
@@ -150,15 +166,32 @@ public:
 			return false;
 		}
 #endif
-		AcquireSRWLockExclusive(&poolLock);
-		freeNode->next = top;
-		top = freeNode;
-		if (!bPreConstructor)
-			objectPtr->~T();
-		poolCnt++;
-		allocCnt--;
-		_LOG(dfLOG_LEVEL_DEBUG, L"[freeObject] : allocCnt = %d / poolCnt = %d\n", allocCnt, poolCnt);
-		ReleaseSRWLockExclusive(&poolLock);
+
+		Node* t;
+		Node* nextTop;
+		Node* maskedT;
+		do
+		{
+			t = top;
+			maskedT = UnpackingNode(t);
+			freeNode->next = maskedT;
+			nextTop = PackingNode(freeNode, GetNodeStamp(t) + 1);
+		} while (InterlockedCompareExchangePointer((void* volatile*)&top, nextTop, t) != t);
+
+
+		//------------------------------------------------------------------------------------------------
+		// 락 프리 스택을 이용한 오브젝트 풀 구현의 한계
+		// - 락을 걸지 않았으니 소멸자 호출 시점에 이미 다른 스레드에서 해당 오브젝트를 할당 받았을 수 있다.
+		// - 락 프리 스택 오브젝트 풀은 반납 시 소멸자 호출 불가 (어차피 락 프리 스택 오브젝트 풀은 락 프리 자료구조의 노드 풀에서만 사용하기 때문에 소멸자 호출이 필요 없음)
+		//------------------------------------------------------------------------------------------------
+		//if (!bPreConstructor)
+			//objectPtr->~T();
+
+#ifdef dfDebugObjectPool
+		InterlockedIncrement(&poolCnt);
+		InterlockedDecrement(&allocCnt);
+#endif
+
 		return true;
 	}
 
@@ -172,6 +205,20 @@ public:
 		return allocCnt;
 	}
 
+
+	inline Node* PackingNode(Node* ptr, ULONGLONG stamp)
+	{
+		return (Node*)((ULONGLONG)ptr | (stamp << stampShift));
+	}
+	inline Node* UnpackingNode(Node* ptr)
+	{
+		return (Node*)((ULONGLONG)ptr & nodeMask);
+	}
+	inline ULONGLONG GetNodeStamp(Node* ptr)
+	{
+		return (ULONGLONG)ptr >> stampShift;
+	}
+
 private:
 	Node* top;
 	bool bPreConstructor;
@@ -179,5 +226,10 @@ private:
 	ULONG allocCnt;
 	ULONG poolCnt;
 	
-	SRWLOCK poolLock;
+
+	//--------------------------------------------
+	// Node*의 하위 47비트 추출할 마스크
+	//--------------------------------------------
+	static const ULONGLONG nodeMask = (1ULL << 47) - 1;
+	static const ULONG stampShift = 47;
 };
