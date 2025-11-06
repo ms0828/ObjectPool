@@ -126,10 +126,13 @@
   <ItemGroup>
     <ClCompile Include="Log.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="Profiler.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="LockFreeStack.h" />
     <ClInclude Include="Log.h" />
     <ClInclude Include="ObjectPool.h" />
+    <ClInclude Include="Profiler.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

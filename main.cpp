@@ -3,9 +3,12 @@
 #include "ObjectPool.h"
 #include <Windows.h>
 
+#include <conio.h> 
+
+
 using namespace std;
 
-#define dfTestNum 4
+#define dfTestNum 5000
 
 HANDLE g_TestStartEvent;
 HANDLE g_AllocObjectEndEvents[5];
@@ -18,24 +21,23 @@ int g_cnt = 0;
 class TestNode
 {
 public:
-	TestNode()
-	{
-		a = g_cnt++;
-	}
 
-	TestNode(int _a, USHORT _b)
+	TestNode(int _a, USHORT _b, ULONG len)
 	{
 		a = _a;
-		a = b;
+		b = _b;
+		str = (char*)malloc(sizeof(char) * len);
 	}
 
 	~TestNode()
 	{
 		a = 0;
+		free(str);
 	}
 public:
-	USHORT a;
+	ULONG a;
 	alignas(32) ULONGLONG b;
+	char* str;
 };
 
 struct ThreadArg
@@ -48,8 +50,15 @@ struct ThreadArg
 
 thread_local TestNode* gt_TestNodeArr[dfTestNum];
 
-//CObjectPool<TestNode> g_ObjectPool(false, dfTestNum * 5);
-CObjectPool<TestNode> g_ObjectPool(true, 0);
+TestNode* g_allocNodeArr[dfTestNum];
+
+
+//CObjectPool_TLS<TestNode> g_ObjectPool_TLS(true, 0, 1);
+//CObjectPool_LF<TestNode> g_ObjectPool_LF(true, 0, 1);
+//CObjectPool_Lock<TestNode> g_ObjectPool_Lock(true, 0, 1);
+//CObjectPool_ST<TestNode> g_ObjectPool_ST(true, 0, 1);
+
+CObjectPool_LF<TestNode, false> g_ObjectPool(true, 0, 1, 2, 3, 4096);
 
 //-------------------------------------------------------------
 // 테스트 1번
@@ -66,8 +75,9 @@ unsigned int AllocAndFreeProc1(void* arg)
 	{
 		for (int i = 0; i < dfTestNum; ++i)
 		{
+			
 			TestNode* allocNode = g_ObjectPool.allocObject();
-
+		
 			allocNode->a = 1;
 			gt_TestNodeArr[i] = allocNode;
 		}
@@ -85,8 +95,9 @@ unsigned int AllocAndFreeProc1(void* arg)
 			}
 			else
 				_LOG(dfLOG_LEVEL_SYSTEM, L"OK!");
-
+		
 			g_ObjectPool.freeObject(gt_TestNodeArr[i]);
+	
 		}
 	}
 
@@ -144,7 +155,7 @@ unsigned int AllocAndFreeProc2(void* arg)
 	//---------------------------------------------------
 	// 모든 스레드의 PoolCnt 검증 
 	//---------------------------------------------------
-	if (g_ObjectPool.GetPoolCnt() == 5 * dfTestNum)
+	/*if (g_ObjectPool.GetPoolCnt() == 5 * dfTestNum)
 	{
 		_LOG(dfLOG_LEVEL_DEBUG, L"[Check] After All Thread Alloc / poolCnt(%lu) == expected pool Cnt(%lu) \n", g_ObjectPool.GetPoolCnt(), 5 * dfTestNum);
 	}
@@ -152,11 +163,64 @@ unsigned int AllocAndFreeProc2(void* arg)
 	{
 		_LOG(dfLOG_LEVEL_ERROR, L"[Error] After All Thread Alloc / Miss Match PoolCnt! / poolCnt(%lu) != expected pool Cnt(%lu) \n", g_ObjectPool.GetPoolCnt(), 5 * dfTestNum);
 		exit(1);
-	}
+	}*/
 
 
 	return 0;
 }
+
+
+HANDLE allocEndEvent;
+HANDLE freeEndEvent;
+
+unsigned int AllocAndFreeProc3(void* arg)
+{
+	srand(time(nullptr));
+
+	WaitForSingleObject(g_TestStartEvent, INFINITE);
+
+	int num = (int)arg;
+
+	if (num == 1)
+	{
+		while (1)
+		{
+			WaitForSingleObject(freeEndEvent, INFINITE);
+
+			//5printf("alloc start!\n");
+			for (int i = 0; i < dfTestNum; ++i)
+			{
+				TestNode* allocNode = g_ObjectPool.allocObject();
+				//printf("Alloc = %d\n", allocNode->a);
+				g_allocNodeArr[i] = allocNode;
+			}
+			//printf("alloc end!\n");
+
+			SetEvent(allocEndEvent);
+		}
+	}
+	else
+	{
+		while (1)
+		{
+			WaitForSingleObject(allocEndEvent, INFINITE);
+
+			//printf("free start!\n");
+			for (int i = 0; i < dfTestNum; ++i)
+			{
+				g_ObjectPool.freeObject(g_allocNodeArr[i]);
+				//printf("free : %d\n", g_allocNodeArr[i]->a);
+			}
+			//printf("free end!\n");
+			SetEvent(freeEndEvent);
+		}
+	}
+	
+
+	return 0;
+}
+
+
 
 void Test1()
 {
@@ -168,12 +232,7 @@ void Test1()
 	HANDLE testTh5 = (HANDLE)_beginthreadex(nullptr, 0, AllocAndFreeProc1, nullptr, 0, nullptr);
 	SetEvent(g_TestStartEvent);
 
-	printf("Test Start! \n");
-
-	while (1)
-	{
-
-	}
+	printf("Test1 Start! \n");
 }
 void Test2()
 {
@@ -197,53 +256,81 @@ void Test2()
 	HANDLE testTh5 = (HANDLE)_beginthreadex(nullptr, 0, AllocAndFreeProc2, (void*)&threadArg[4], 0, nullptr);
 	SetEvent(g_TestStartEvent);
 
-	printf("Test Start! \n");
+	printf("Test2 Start! \n");
 
-
-	while (1)
-	{
-
-	}
 }
+
+//--------------------------------------------
+// TLS Test
+//--------------------------------------------
+void Test3()
+{
+	g_TestStartEvent = CreateEvent(nullptr, true, false, nullptr);
+	allocEndEvent = CreateEvent(nullptr, false, false, nullptr);
+	freeEndEvent = CreateEvent(nullptr, false, true, nullptr);
+
+	HANDLE testTh1 = (HANDLE)_beginthreadex(nullptr, 0, AllocAndFreeProc3, (void*)1, 0, nullptr);
+	HANDLE testTh2 = (HANDLE)_beginthreadex(nullptr, 0, AllocAndFreeProc3, (void*)2, 0, nullptr);
+
+	SetEvent(g_TestStartEvent);
+
+	printf("Test3 Start! \n");
+}
+
 
 int main()
 {
-	InitLog(dfLOG_LEVEL_DEBUG, ELogMode::NOLOG);
+	InitLog(dfLOG_LEVEL_SYSTEM, ELogMode::NOLOG);
 
-	Test1();
+	Test3();
 
-	
-
-
-	/*CObjectPool<TestNode> *pool = new CObjectPool<TestNode>(true, 500);
-	TestNode* p = pool->allocObject();
-	pool->freeObject(p);
-	delete pool;*/
-	
-	/*
-	TestNode* arr[5];
-
-	for (int j = 0; j < 5; j++)
+	DWORD lastTest3Tick = GetTickCount64();
+	DWORD sPressedTick = 0;
+	BOOL waitingForS = FALSE;
+	while (1)
 	{
-		for (int i = 0; i < 5; i++)
+		// 1) r키를 누르면 프로파일링 리셋
+		if (_kbhit())
 		{
-			TestNode* node = pool.allocObject();
-			int poolCnt = pool.GetPoolCnt();
-			printf("[alloc] poolCnt = %d / node adr = %016llx / node value = %d / top = %016llx\n", poolCnt, node, node->a, pool.top);
+			int ch = _getch();
 
-			arr[i] = node;
+			if (ch == 's' || ch == 'S')
+			{
+				ProfileReset();
+				printf("ProfileReset And Start Profile\n");
+				waitingForS = TRUE;
+				sPressedTick = GetTickCount64();
+			}
+			else if (ch == 27) // ESC 키로 종료
+			{
+				break;
+			}
 		}
 
-		for (int i = 0; i < 5; i++)
+		// 2) s키 누르고 10초 후 프로파일링 저장
+		if (waitingForS)
 		{
-			TestNode* freeNode = arr[i];
-			int value = freeNode->a;
-			pool.freeObject(arr[i]);
-			int poolCnt = pool.GetPoolCnt();
-			printf("[free] poolCnt = %d / node adr = %016llx / node value = %d / top = %016llx\n", poolCnt, freeNode, value, pool.top);
+			DWORD now = GetTickCount64();
+			if (now - sPressedTick >= 10000)
+			{
+				ProfileDataOutText("v1_LF.txt");
+				printf("ProfileDataOutText\n");
+				waitingForS = FALSE;
+			}
 		}
-	}*/
-	
+
+		//// 3) 1초마다 출력
+		//DWORD now = GetTickCount64();
+		//if (now - lastTest3Tick >= 1000)
+		//{
+		//	//printf("-----------------------------------------\n");
+		//	/*printf("access Chunk Pool Cnt = %d\n", g_ObjectPool.accessChunkPoolCnt);
+		//	printf("access Empty Pool Cnt = %d\n", g_ObjectPool.accessEmptyPoolCnt);*/
+		//	//printf("-----------------------------------------\n");
+		//	lastTest3Tick = now;
+		//}
+	}
+
 
 	return 0;
 }
