@@ -1,5 +1,8 @@
 #include <iostream>
 #include <process.h>
+
+#define PROFILE
+
 #include "ObjectPool.h"
 #include <Windows.h>
 
@@ -8,7 +11,7 @@
 
 using namespace std;
 
-#define dfTestNum 5000
+#define dfTestNum 1000000
 
 HANDLE g_TestStartEvent;
 HANDLE g_AllocObjectEndEvents[5];
@@ -58,7 +61,8 @@ TestNode* g_allocNodeArr[dfTestNum];
 //CObjectPool_Lock<TestNode> g_ObjectPool_Lock(true, 0, 1);
 //CObjectPool_ST<TestNode> g_ObjectPool_ST(true, 0, 1);
 
-CObjectPool_LF<TestNode, false> g_ObjectPool(true, 0, 1, 2, 3, 4096);
+//CObjectPool_TLS<TestNode> g_ObjectPool(true, dfTestNum / dfNumOfChunkObject, 1, 2, 3, 10);
+CObjectPool_LF<TestNode> g_ObjectPool(true, dfTestNum, 1, 2, 3, 10);
 
 //-------------------------------------------------------------
 // 테스트 1번
@@ -170,53 +174,47 @@ unsigned int AllocAndFreeProc2(void* arg)
 }
 
 
-HANDLE allocEndEvent;
-HANDLE freeEndEvent;
+HANDLE allocEndEvents[3];
+HANDLE freeEndEvents[3];
+HANDLE testEndEvent;
+
+ULONG allocIndex = 0;
+ULONG freeIndex = 0;
 
 unsigned int AllocAndFreeProc3(void* arg)
 {
-	srand(time(nullptr));
-
 	WaitForSingleObject(g_TestStartEvent, INFINITE);
 
-	int num = (int)arg;
+	int threadNum = (int)arg;
 
-	if (num == 1)
+	if (threadNum <= 3)
 	{
 		while (1)
 		{
-			WaitForSingleObject(freeEndEvent, INFINITE);
-
-			//5printf("alloc start!\n");
-			for (int i = 0; i < dfTestNum; ++i)
-			{
-				TestNode* allocNode = g_ObjectPool.allocObject();
-				//printf("Alloc = %d\n", allocNode->a);
-				g_allocNodeArr[i] = allocNode;
-			}
-			//printf("alloc end!\n");
-
-			SetEvent(allocEndEvent);
-		}
+			ULONG index = InterlockedIncrement(&allocIndex);
+			if (index >= dfTestNum)
+				break;
+			g_allocNodeArr[index] = g_ObjectPool.allocObject();
+		}	
+		SetEvent(allocEndEvents[threadNum - 1]);
 	}
 	else
 	{
+		WaitForMultipleObjects(3, allocEndEvents, true, INFINITE);
 		while (1)
 		{
-			WaitForSingleObject(allocEndEvent, INFINITE);
-
-			//printf("free start!\n");
-			for (int i = 0; i < dfTestNum; ++i)
-			{
-				g_ObjectPool.freeObject(g_allocNodeArr[i]);
-				//printf("free : %d\n", g_allocNodeArr[i]->a);
-			}
-			//printf("free end!\n");
-			SetEvent(freeEndEvent);
+			ULONG index = InterlockedIncrement(&freeIndex);
+			if (index >= dfTestNum)
+				break;
+			g_ObjectPool.freeObject(g_allocNodeArr[index]);
 		}
+		SetEvent(freeEndEvents[threadNum - 4]);
 	}
 	
-
+	while (1)
+	{
+		int a = 0;
+	}
 	return 0;
 }
 
@@ -266,15 +264,33 @@ void Test2()
 void Test3()
 {
 	g_TestStartEvent = CreateEvent(nullptr, true, false, nullptr);
-	allocEndEvent = CreateEvent(nullptr, false, false, nullptr);
-	freeEndEvent = CreateEvent(nullptr, false, true, nullptr);
+	for (int i = 0; i < 3; i++)
+	{
+		allocEndEvents[i] = CreateEvent(nullptr, true, false, nullptr);
+		freeEndEvents[i] = CreateEvent(nullptr, true, false, nullptr);
+	}
+	testEndEvent = CreateEvent(nullptr, false, false, nullptr);
 
 	HANDLE testTh1 = (HANDLE)_beginthreadex(nullptr, 0, AllocAndFreeProc3, (void*)1, 0, nullptr);
 	HANDLE testTh2 = (HANDLE)_beginthreadex(nullptr, 0, AllocAndFreeProc3, (void*)2, 0, nullptr);
+	HANDLE testTh3 = (HANDLE)_beginthreadex(nullptr, 0, AllocAndFreeProc3, (void*)3, 0, nullptr);
+	HANDLE testTh4 = (HANDLE)_beginthreadex(nullptr, 0, AllocAndFreeProc3, (void*)4, 0, nullptr);
+	HANDLE testTh5 = (HANDLE)_beginthreadex(nullptr, 0, AllocAndFreeProc3, (void*)5, 0, nullptr);
+	HANDLE testTh6 = (HANDLE)_beginthreadex(nullptr, 0, AllocAndFreeProc3, (void*)6, 0, nullptr);
 
+
+	Sleep(3000);
 	SetEvent(g_TestStartEvent);
 
 	printf("Test3 Start! \n");
+	WaitForMultipleObjects(3, freeEndEvents, true, INFINITE);
+	printf("Test3 End! \n");
+
+
+	ProfileDataOutText("v5_LF.txt");
+	printf("ProfileDataOutText\n");
+
+	return;
 }
 
 
@@ -313,7 +329,7 @@ int main()
 			DWORD now = GetTickCount64();
 			if (now - sPressedTick >= 10000)
 			{
-				ProfileDataOutText("v1_LF.txt");
+				ProfileDataOutText("v6_LF.txt");
 				printf("ProfileDataOutText\n");
 				waitingForS = FALSE;
 			}
